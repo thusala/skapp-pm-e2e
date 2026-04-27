@@ -29,7 +29,7 @@ env:
   PR_TITLE: ${{ github.event.client_payload.pr_title || github.event.inputs.pr_title || 'Manual trigger' }}
   PR_URL: ${{ github.event.client_payload.pr_url || '' }}
   PR_AUTHOR: ${{ github.event.client_payload.pr_author || '' }}
-  SOURCE_REPO: ${{ github.event.client_payload.source_repo || 'rootcodelabs/skapp-pm' }}
+  SOURCE_REPO: ${{ github.event.client_payload.source_repo || 'thusala/skapp-pm' }}
 
 jobs:
   generate-and-test:
