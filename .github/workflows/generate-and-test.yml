@@ -1,0 +1,365 @@
+name: Generate & Run E2E API Tests
+
+on:
+  repository_dispatch:
+    types: [generate-e2e-tests]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA from rootcodelabs/skapp-pm to test against"
+        required: true
+      pr_number:
+        description: "Source PR number (optional, for branch naming)"
+        required: false
+        default: "manual"
+      pr_title:
+        description: "Source PR title (optional)"
+        required: false
+        default: "Manual trigger"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  # Resolve inputs from either repository_dispatch or workflow_dispatch
+  COMMIT_SHA: ${{ github.event.client_payload.commit_sha || github.event.inputs.commit_sha || '' }}
+  SOURCE_BRANCH: ${{ github.event.client_payload.branch || 'develop' }}
+  PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr_number || 'manual' }}
+  PR_TITLE: ${{ github.event.client_payload.pr_title || github.event.inputs.pr_title || 'Manual trigger' }}
+  PR_URL: ${{ github.event.client_payload.pr_url || '' }}
+  PR_AUTHOR: ${{ github.event.client_payload.pr_author || '' }}
+  SOURCE_REPO: ${{ github.event.client_payload.source_repo || 'rootcodelabs/skapp-pm' }}
+
+jobs:
+  generate-and-test:
+    name: Generate E2E tests, run against backend, open PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # -------------------------------------------------------------------
+      # 1. Checkout this E2E repo
+      # -------------------------------------------------------------------
+      - name: Checkout E2E repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -------------------------------------------------------------------
+      # 2. Checkout skapp-pm source at the specified commit SHA
+      # -------------------------------------------------------------------
+      - name: Checkout skapp-pm source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.COMMIT_SHA }}
+          path: source
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+
+      # -------------------------------------------------------------------
+      # 3. Setup Node.js
+      # -------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # -------------------------------------------------------------------
+      # 4. Install E2E repo dependencies
+      # -------------------------------------------------------------------
+      - name: Install E2E dependencies
+        run: npm ci || npm install
+
+      # -------------------------------------------------------------------
+      # 5. Decode dispatch payload — extract changed files and schema
+      # -------------------------------------------------------------------
+      - name: Extract dispatch payload
+        id: payload
+        run: |
+          # Get changed files from dispatch payload or scan source diff
+          CHANGED_FILES='${{ toJSON(github.event.client_payload.changed_files) }}'
+          if [ "$CHANGED_FILES" = "null" ] || [ -z "$CHANGED_FILES" ]; then
+            echo "No changed_files in payload — will use full schema for generation."
+            echo "has_changed_files=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$CHANGED_FILES" | jq -r '.[]' > /tmp/changed_files.txt
+            echo "has_changed_files=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Decode schema snapshot or use the one from source checkout
+          SCHEMA_B64='${{ github.event.client_payload.schema_b64 }}'
+          if [ -n "$SCHEMA_B64" ] && [ "$SCHEMA_B64" != "null" ]; then
+            echo "$SCHEMA_B64" | base64 -d > /tmp/schema.gql
+          else
+            cp source/backend/graphql/schema.gql /tmp/schema.gql
+          fi
+
+          echo "Schema file ready ($(wc -l < /tmp/schema.gql) lines)"
+
+      # -------------------------------------------------------------------
+      # 6. Prepare changed files list for Gemini CLI prompt
+      # -------------------------------------------------------------------
+      - name: Prepare changed files context
+        run: |
+          if [ -f /tmp/changed_files.txt ]; then
+            # Build a simple list of changed files for the prompt
+            CHANGED_LIST=$(cat /tmp/changed_files.txt | tr '\n' ', ')
+            echo "Changed backend files: ${CHANGED_LIST}"
+          else
+            echo "No specific changed files — Gemini will scan resolvers/services."
+          fi
+
+      # -------------------------------------------------------------------
+      # 7. Install Gemini CLI
+      # -------------------------------------------------------------------
+      - name: Install Gemini CLI
+        run: npm install -g @google/gemini-cli
+
+      # -------------------------------------------------------------------
+      # 8. Generate tests via Gemini CLI (non-interactive headless mode)
+      #    Gemini CLI reads the codebase directly — no manual prompt assembly.
+      #    The GEMINI.md file in the repo root provides persistent context.
+      # -------------------------------------------------------------------
+      - name: Generate tests via Gemini CLI
+        id: generate
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # Build the changed files section for the prompt
+          CHANGED_FILES_SECTION=""
+          if [ -f /tmp/changed_files.txt ]; then
+            CHANGED_FILES_SECTION="The following backend source files were changed in this PR:
+          $(cat /tmp/changed_files.txt)
+
+          Read each changed file from the source/ directory to understand what was added or modified.
+          Focus test generation on the resolvers, services, and mutations/queries touched by these files."
+          else
+            CHANGED_FILES_SECTION="No specific changed files provided. Scan source/backend/src/ for resolver and service files.
+          Focus on generating tests for the key mutations and queries in the GraphQL schema."
+          fi
+
+          # Gemini CLI prompt — it can read files, write files, and run shell commands
+          PROMPT="You are generating E2E API tests for a NestJS GraphQL backend using Playwright.
+
+          WORKSPACE LAYOUT:
+          - source/backend/graphql/schema.gql — The full GraphQL schema (read this first)
+          - source/backend/src/ — Backend source code (resolvers, services, modules)
+          - tests/helpers/graphql.ts — Reusable GraphQL request helper (graphql, graphqlOk functions)
+          - tests/helpers/auth.ts — JWT token helper (createTestToken function)
+          - tests/api/*.test.ts — Existing sample tests (READ ALL of these as style reference)
+
+          ${CHANGED_FILES_SECTION}
+
+          TASK:
+          1. Read the GraphQL schema at source/backend/graphql/schema.gql
+          2. Read ALL existing test files in tests/api/ to understand the exact patterns and style
+          3. Read tests/helpers/graphql.ts and tests/helpers/auth.ts to understand the available helpers
+          4. If changed files are listed above, read them from source/ to understand the new/modified code
+          5. Generate NEW Playwright API test files for the relevant mutations and queries
+          6. Write each generated test file to tests/api/<module-name>.gen.test.ts
+             - Use the .gen.test.ts suffix to distinguish from hand-written tests
+             - Do NOT overwrite any existing .test.ts files
+
+          RULES:
+          - Import { test, expect } from '@playwright/test'
+          - Import { createTestToken } from '../helpers/auth'
+          - Import { graphql, graphqlOk } from '../helpers/graphql'
+          - Follow the EXACT patterns from existing tests (CRUD lifecycle, error handling, auth checks)
+          - Each test file covers one module/resolver
+          - Use test.describe() blocks and descriptive test names
+          - Test: happy path, error cases, validation, auth failures
+          - Use test.beforeAll() to create prerequisite resources
+          - Do NOT generate tests that duplicate what already exists in tests/api/"
+
+          echo "Running Gemini CLI in headless mode..."
+          gemini -p "$PROMPT" \
+            --allow-tool='shell(cat:*)' \
+            --allow-tool='shell(find:*)' \
+            --allow-tool='shell(ls:*)' \
+            --allow-tool='shell(head:*)' \
+            --allow-tool=read \
+            --allow-tool=write \
+            --no-ask-user \
+            2>&1 | tee /tmp/gemini_output.txt
+
+          EXIT_CODE=${PIPESTATUS[0]}
+
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "⚠ Gemini CLI exited with code ${EXIT_CODE}"
+            cat /tmp/gemini_output.txt
+            echo "has_generated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "✅ Gemini CLI completed successfully"
+          echo "has_generated=true" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # 9. Detect generated test files
+      # -------------------------------------------------------------------
+      - name: Detect generated test files
+        id: detect
+        run: |
+          MODIFIED=$(git diff --name-only HEAD \
+            | grep -E '\.(test|spec)\.(ts|tsx)$' || true)
+          UNTRACKED=$(git ls-files --others --exclude-standard \
+            | grep -E '\.(test|spec)\.(ts|tsx)$' || true)
+          ALL=$(printf '%s\n%s' "$MODIFIED" "$UNTRACKED" \
+            | sed '/^[[:space:]]*$/d' | sort -u)
+
+          if [ -z "$ALL" ]; then
+            echo "No test files generated — skipping PR creation."
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "=== Generated test files ==="
+            echo "$ALL"
+            echo "$ALL" > /tmp/generated_tests.txt
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # -------------------------------------------------------------------
+      # 10. Run Playwright tests against dev environment
+      # -------------------------------------------------------------------
+      - name: Run Playwright API tests
+        id: playwright
+        if: steps.detect.outputs.has_tests == 'true'
+        env:
+          API_BASE_URL: https://app-api.skapp.dev
+        run: |
+          set +e
+          npx playwright test --reporter=list 2>&1 | tee /tmp/playwright_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          # Extract summary
+          SUMMARY=$(tail -5 /tmp/playwright_output.txt | head -3)
+          FAILED_TESTS=$(grep -E "^\s+\d+\) " /tmp/playwright_output.txt | head -20 || true)
+
+          if [ "$EXIT_CODE" -eq 0 ]; then
+            echo "playwright_passed=true" >> "$GITHUB_OUTPUT"
+            echo "playwright_summary=All tests passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "playwright_passed=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "playwright_summary<<EOF"
+              echo "$SUMMARY"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "playwright_failures<<EOF"
+              echo "$FAILED_TESTS"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      # -------------------------------------------------------------------
+      # 11. Commit, push, and open PR
+      # -------------------------------------------------------------------
+      - name: Commit, push, and open PR
+        if: steps.detect.outputs.has_tests == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAYWRIGHT_PASSED: ${{ steps.playwright.outputs.playwright_passed }}
+          PLAYWRIGHT_SUMMARY: ${{ steps.playwright.outputs.playwright_summary }}
+          PLAYWRIGHT_FAILURES: ${{ steps.playwright.outputs.playwright_failures }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # ---- Branch name and PR title ----
+          if [ "$PR_NUMBER" != "manual" ]; then
+            BRANCH="feat/e2e-api-pr-${PR_NUMBER}"
+            PR_TITLE_TEXT="test(e2e): API tests for ${SOURCE_REPO}#${PR_NUMBER} — ${PR_TITLE}"
+            COMMIT_MSG="test(e2e): auto-generated API tests for PR #${PR_NUMBER} [skip ci]"
+          else
+            BRANCH="feat/e2e-api-manual-${DATE}-${GITHUB_RUN_ID}"
+            PR_TITLE_TEXT="test(e2e): Auto-generated API tests (${DATE})"
+            COMMIT_MSG="test(e2e): auto-generated API tests from manual trigger [skip ci]"
+          fi
+
+          # Delete remote branch if it already exists (re-run scenario)
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+
+          git checkout -b "$BRANCH"
+
+          while IFS= read -r f; do
+            git add -- "$f"
+          done < /tmp/generated_tests.txt
+
+          git commit -m "$COMMIT_MSG"
+          git push origin "$BRANCH"
+
+          # ---- Build PR body ----
+          TEST_LIST=$(awk '{ print "- `" $0 "`" }' /tmp/generated_tests.txt)
+
+          if [ "$PR_NUMBER" != "manual" ] && [ -n "$PR_URL" ]; then
+            SOURCE_SECTION="### Source PR\n> [${SOURCE_REPO}#${PR_NUMBER} — ${PR_TITLE}](${PR_URL})\n> Author: @${PR_AUTHOR}\n"
+          else
+            SOURCE_SECTION="### Trigger\n> Manual workflow dispatch — commit \`${COMMIT_SHA:0:7}\`\n"
+          fi
+
+          if [ -f /tmp/changed_files.txt ]; then
+            CHANGED_LIST=$(awk '{ print "- `" $0 "`" }' /tmp/changed_files.txt)
+          else
+            CHANGED_LIST="- _(full schema scan)_"
+          fi
+
+          if [ "$PLAYWRIGHT_PASSED" = "true" ]; then
+            TEST_SECTION="### ✅ Test Results\n> ${PLAYWRIGHT_SUMMARY}\n"
+          else
+            TEST_SECTION="### ❌ Test Results — Action Required\n> ${PLAYWRIGHT_SUMMARY}\n"
+            if [ -n "$PLAYWRIGHT_FAILURES" ]; then
+              TEST_SECTION="${TEST_SECTION}\nFailing tests:\n\`\`\`\n${PLAYWRIGHT_FAILURES}\n\`\`\`\n"
+            fi
+            TEST_SECTION="${TEST_SECTION}\nRun locally:\n\`\`\`bash\nAPI_BASE_URL=https://app-api.skapp.dev npx playwright test\n\`\`\`\n"
+          fi
+
+          printf "## Auto-generated E2E API Tests\n\n%b\n%b\n### Source files covered\n%s\n\n### Generated test files\n%s\n\n> **Review before merging.** AI-generated tests should be reviewed for correctness.\n" \
+            "$SOURCE_SECTION" "$TEST_SECTION" "$CHANGED_LIST" "$TEST_LIST" > /tmp/pr_body.md
+
+          # ---- Assign to source PR author if available ----
+          ASSIGNEE_FLAG=""
+          if [ -n "$PR_AUTHOR" ]; then
+            ASSIGNEE_FLAG="--assignee ${PR_AUTHOR}"
+          fi
+
+          gh pr create \
+            --title "$PR_TITLE_TEXT" \
+            --body-file /tmp/pr_body.md \
+            --base main \
+            --head "$BRANCH" \
+            $ASSIGNEE_FLAG \
+            || echo "⚠ PR creation failed — branch was pushed, create PR manually."
+
+      # -------------------------------------------------------------------
+      # 12. Post status comment on source PR (optional cross-repo feedback)
+      # -------------------------------------------------------------------
+      - name: Comment on source PR
+        if: steps.detect.outputs.has_tests == 'true' && env.PR_NUMBER != 'manual' && env.PR_URL != ''
+        continue-on-error: true
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          PLAYWRIGHT_PASSED: ${{ steps.playwright.outputs.playwright_passed }}
+        run: |
+          if [ "$PLAYWRIGHT_PASSED" = "true" ]; then
+            EMOJI="✅"
+            STATUS="passed"
+          else
+            EMOJI="❌"
+            STATUS="failed"
+          fi
+
+          E2E_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          COMMENT_BODY="${EMOJI} **E2E API Tests ${STATUS}**\n\nGenerated Playwright API tests for this PR.\n\n- [View E2E test run](${E2E_RUN_URL})\n- Tests were auto-generated and committed to the E2E repo.\n\n_This comment was posted automatically by the E2E test pipeline._"
+
+          curl -sf -X POST \
+            "https://api.github.com/repos/${SOURCE_REPO}/issues/${PR_NUMBER}/comments" \
+            -H "Authorization: token ${SOURCE_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d "$(jq -n --arg body "$(printf "%b" "$COMMENT_BODY")" '{ body: $body }')" \
+            && echo "✅ Comment posted on source PR" \
+            || echo "⚠ Could not post comment on source PR (token may lack permission)"

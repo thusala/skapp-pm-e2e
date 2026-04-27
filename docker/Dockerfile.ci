@@ -1,0 +1,25 @@
+# Dockerfile for building the skapp-pm backend in CI.
+# This is used by docker-compose.ci.yml when the backend image is built from source.
+#
+# Unlike the production Dockerfile (which expects pre-built dist/), this one
+# builds from source so E2E tests can run against any commit SHA.
+
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Copy package files first for better layer caching
+COPY backend/package*.json ./
+
+# Install dependencies
+RUN npm ci --force
+
+# Copy backend source
+COPY backend/ ./
+
+# Build the NestJS app
+RUN npm run build
+
+EXPOSE 3000
+
+CMD ["node", "dist/main"]

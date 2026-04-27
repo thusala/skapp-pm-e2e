@@ -1,0 +1,19 @@
+{
+  "name": "skapp-pm-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "E2E API tests for skapp-pm backend (Playwright)",
+  "scripts": {
+    "test": "playwright test",
+    "test:ci": "CI=true playwright test --reporter=list,json",
+    "test:debug": "playwright test --debug",
+    "docker:up": "docker compose -f docker/docker-compose.ci.yml up -d",
+    "docker:down": "docker compose -f docker/docker-compose.ci.yml down -v",
+    "docker:logs": "docker compose -f docker/docker-compose.ci.yml logs -f backend"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "jsonwebtoken": "^9.0.2",
+    "@types/jsonwebtoken": "^9.0.7"
+  }
+}

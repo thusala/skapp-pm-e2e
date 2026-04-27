@@ -1,0 +1,97 @@
+# Docker Compose stack for running E2E API tests in CI.
+# Spins up Postgres, Redis, and the skapp-pm backend.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.ci.yml up -d
+#   # wait for backend health check, then run tests
+#   docker compose -f docker/docker-compose.ci.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: skapp_pm_test
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d skapp_pm_test"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ${BACKEND_SOURCE_PATH:-./../source}
+      dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile.ci}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: test
+      PORT: "3000"
+      # ---------- Database ----------
+      TENANT_DATABASE_WRITE_URL: "postgresql://test:test@postgres:5432/skapp_pm_test"
+      TENANT_DATABASE_READ_URL: "postgresql://test:test@postgres:5432/skapp_pm_test"
+      DB_SSL: "false"
+      USE_DB_SSL: "false"
+      # ---------- Redis ----------
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_MODE: standalone
+      REDIS_TLS: "false"
+      # ---------- Auth ----------
+      SIGN_IN_KEY: "e2e-test-sign-in-key-at-least-32-chars-long!!"
+      INTERNAL_API_KEY: "e2e-test-internal-api-key"
+      HEALTH_API_KEY: "e2e-test-health-api-key"
+      # ---------- Core API (mocked / stubbed in tests) ----------
+      CORE_API_URL: "http://localhost:9999"
+      CORE_GET_EMPLOYEES_API_URL: "/api/v1/employees"
+      CORE_GET_EMPLOYEES_AUTH_PICS_API_URL: "/api/v1/employees/auth-pics"
+      CORE_GET_VERSIONS_API_URL: "/api/v1/versions"
+      CORE_GET_JOBS_API_URL: "/api/v1/jobs"
+      CORE_INTERNAL_API_KEY: "e2e-test-core-internal-key"
+      # ---------- Email (dummy — not called in E2E) ----------
+      SENDGRID_API_KEY: "SG.e2e-test-dummy-key"
+      SENDGRID_FROM_EMAIL: "test@example.com"
+      DEFAULT_EMAIL_BUTTON_URL: "http://localhost:3000"
+      # ---------- AWS S3 (dummy — not called in E2E) ----------
+      AWS_CORE_BUCKET_NAME: "e2e-core-bucket"
+      AWS_PM_BUCKET_NAME: "e2e-pm-bucket"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "AKIAE2ETESTDUMMY"
+      AWS_SECRET_ACCESS_KEY: "e2e-test-dummy-secret-key"
+      # ---------- Jira (dummy) ----------
+      JIRA_CLIENT_ID: "e2e-test-jira-client-id"
+      JIRA_CLIENT_SECRET: "e2e-test-jira-client-secret"
+      # ---------- OpenSearch (dummy) ----------
+      OPENSEARCH_NODE: "http://localhost:9200"
+      OPENSEARCH_USERNAME: "admin"
+      OPENSEARCH_PASSWORD: "admin"
+      OPENSEARCH_SSL_REJECT_UNAUTHORIZED: "false"
+      # ---------- Misc ----------
+      API_BASE_URL: "http://localhost:3000"
+      AI_API_KEY: "e2e-test-ai-api-key"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000 || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
