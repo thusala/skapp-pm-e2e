@@ -140,6 +140,7 @@ jobs:
         id: generate
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_CLI_TRUST_WORKSPACE: "true"
         run: |
           # Build the changed files section for the prompt
           CHANGED_FILES_SECTION=""
