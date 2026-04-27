@@ -197,13 +197,7 @@ jobs:
 
           echo "Running Gemini CLI in headless mode..."
           gemini -p "$PROMPT" \
-            --allow-tool='shell(cat:*)' \
-            --allow-tool='shell(find:*)' \
-            --allow-tool='shell(ls:*)' \
-            --allow-tool='shell(head:*)' \
-            --allow-tool=read \
-            --allow-tool=write \
-            --no-ask-user \
+            --yolo \
             2>&1 | tee /tmp/gemini_output.txt
 
           EXIT_CODE=${PIPESTATUS[0]}
