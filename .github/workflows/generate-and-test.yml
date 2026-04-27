@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: "Commit SHA from rootcodelabs/skapp-pm to test against"
+        description: "Commit SHA from thusala/skapp-pm to test against"
         required: true
       pr_number:
         description: "Source PR number (optional, for branch naming)"
@@ -72,7 +72,7 @@ jobs:
         run: npm ci || npm install
 
       # -------------------------------------------------------------------
-      # 5. Decode dispatch payload — extract changed files and schema
+      # 6. Decode dispatch payload — extract changed files and schema
       # -------------------------------------------------------------------
       - name: Extract dispatch payload
         id: payload
@@ -98,7 +98,7 @@ jobs:
           echo "Schema file ready ($(wc -l < /tmp/schema.gql) lines)"
 
       # -------------------------------------------------------------------
-      # 6. Prepare changed files list for Gemini CLI prompt
+      # 7. Prepare changed files list for Gemini CLI prompt
       # -------------------------------------------------------------------
       - name: Prepare changed files context
         run: |
@@ -111,13 +111,13 @@ jobs:
           fi
 
       # -------------------------------------------------------------------
-      # 7. Install Gemini CLI
+      # 8. Install Gemini CLI
       # -------------------------------------------------------------------
       - name: Install Gemini CLI
         run: npm install -g @google/gemini-cli
 
       # -------------------------------------------------------------------
-      # 8. Generate tests via Gemini CLI (non-interactive headless mode)
+      # 9. Generate tests via Gemini CLI (non-interactive headless mode)
       #    Gemini CLI reads the codebase directly — no manual prompt assembly.
       #    The GEMINI.md file in the repo root provides persistent context.
       # -------------------------------------------------------------------
@@ -196,7 +196,7 @@ jobs:
           echo "has_generated=true" >> "$GITHUB_OUTPUT"
 
       # -------------------------------------------------------------------
-      # 9. Detect generated test files
+      # 11. Detect generated test files
       # -------------------------------------------------------------------
       - name: Detect generated test files
         id: detect
@@ -219,7 +219,7 @@ jobs:
           fi
 
       # -------------------------------------------------------------------
-      # 10. Run Playwright tests against dev environment
+      # 12. Run Playwright tests against dev environment
       # -------------------------------------------------------------------
       - name: Run Playwright API tests
         id: playwright
@@ -254,7 +254,7 @@ jobs:
           fi
 
       # -------------------------------------------------------------------
-      # 11. Commit, push, and open PR
+      # 15. Commit, push, and open PR
       # -------------------------------------------------------------------
       - name: Commit, push, and open PR
         if: steps.detect.outputs.has_tests == 'true'
@@ -314,7 +314,7 @@ jobs:
             if [ -n "$PLAYWRIGHT_FAILURES" ]; then
               TEST_SECTION="${TEST_SECTION}\nFailing tests:\n\`\`\`\n${PLAYWRIGHT_FAILURES}\n\`\`\`\n"
             fi
-            TEST_SECTION="${TEST_SECTION}\nRun locally:\n\`\`\`bash\nAPI_BASE_URL=https://app-api.skapp.dev npx playwright test\n\`\`\`\n"
+            TEST_SECTION="${TEST_SECTION}\nRun locally:\n\`\`\`bash\nnpm run docker:up\nnpx playwright test\nnpm run docker:down\n\`\`\`\n"
           fi
 
           printf "## Auto-generated E2E API Tests\n\n%b\n%b\n### Source files covered\n%s\n\n### Generated test files\n%s\n\n> **Review before merging.** AI-generated tests should be reviewed for correctness.\n" \
@@ -335,7 +335,7 @@ jobs:
             || echo "⚠ PR creation failed — branch was pushed, create PR manually."
 
       # -------------------------------------------------------------------
-      # 12. Post status comment on source PR (optional cross-repo feedback)
+      # 16. Post status comment on source PR (optional cross-repo feedback)
       # -------------------------------------------------------------------
       - name: Comment on source PR
         if: steps.detect.outputs.has_tests == 'true' && env.PR_NUMBER != 'manual' && env.PR_URL != ''
