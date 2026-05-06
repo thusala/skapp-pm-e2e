@@ -198,7 +198,7 @@ jobs:
 
           echo "Running Gemini CLI in headless mode..."
           gemini -p "$PROMPT" \
-            -m gemini-2.5-pro \
+            -m gemini-2.5-flash \
             --yolo \
             2>&1 | tee /tmp/gemini_output.txt
 
